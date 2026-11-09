@@ -1,0 +1,135 @@
+BEGIN;
+
+-- Вставляем уникальный набор из штата, города и почтового индекса
+INSERT INTO silver.geolocation (geolocation_state, geolocation_city, geolocation_zip_code_prefix)
+WITH combined_geo AS (
+	SELECT
+		geolocation_state,
+		geolocation_city,
+		geolocation_zip_code_prefix
+	FROM raw.geolocation -- берем наборы адресов из сырой таблицы геолокаций
+
+	UNION ALL
+
+	SELECT
+		customer_state,
+		customer_city,
+		customer_zip_code_prefix
+	FROM raw.customers -- берем наборы адресов из сырой таблицы пользователей
+
+	UNION ALL
+
+	SELECT
+		seller_state,
+		seller_city,
+		seller_zip_code_prefix
+	FROM raw.sellers -- берем наборы адресов из сырой таблицы пользователей
+
+	UNION ALL
+
+	SELECT
+		'UN',
+		'UNKNOWN',
+		'00000' -- Проблема решена: для заказов у которых некорректный адрес. Будут ссылаться на айди для битых адресов
+),
+prepared_geo AS (
+	SELECT DISTINCT
+		geolocation_state,
+		UNACCENT(LOWER(TRIM(REGEXP_REPLACE(geolocation_city, '\s+', ' ', 'g')))) geolocation_city,
+		geolocation_zip_code_prefix
+	FROM combined_geo -- Оставляем уникальные значения и чистим названия городов
+)
+SELECT pg.* FROM prepared_geo pg
+WHERE NOT EXISTS (
+		SELECT 1
+		FROM silver.geolocation sg
+		WHERE pg.geolocation_state = sg.geolocation_state
+			AND pg.geolocation_city = sg.geolocation_city
+			AND pg.geolocation_zip_code_prefix = sg.geolocation_zip_code_prefix
+	) -- Делаем проверку, что такие строки не существуют в таблице silver.geolocation
+	AND pg.geolocation_city ~ $re$^[a-zA-Z .\-\']+$$re$ -- '
+ORDER BY pg.geolocation_zip_code_prefix;
+
+-- Вставляем пользователей и их новые id геолокаций
+INSERT INTO silver.customers (customer_id, customer_unique_id, geolocation_id)
+SELECT rc.customer_id, rc.customer_unique_id, COALESCE(sg.geolocation_id, 1) geolocation_id -- Коалис чтобы выдать заглушку - значение для пользователей, которые не прошли фильтрацию ранее 
+FROM raw.customers rc
+LEFT JOIN silver.geolocation sg
+	ON sg.geolocation_state = rc.customer_state
+	AND sg.geolocation_city = rc.customer_city
+	AND sg.geolocation_zip_code_prefix = rc.customer_zip_code_prefix
+WHERE NOT EXISTS ( -- Делаем проверку, что такие строки не существуют в таблице silver.customers
+	SELECT 1
+	FROM silver.customers sc
+	WHERE sc.customer_id = rc.customer_id
+); 
+
+-- Вставляем статусы заказов в таблицу статусов заказов
+INSERT INTO silver.order_statuses (status_name)
+SELECT DISTINCT order_status FROM raw.orders ro
+WHERE NOT EXISTS (
+	SELECT 1
+	FROM silver.order_statuses sos
+	WHERE ro.order_status = sos.status_name
+);
+
+-- Вставляем сами заказы и их новые ссылки на статусы
+INSERT INTO silver.orders (
+	order_id,
+	customer_id,
+	status_id,
+	order_purchase_timestamp,
+	order_approved_at,
+	order_delivered_carrier_date,
+	order_delivered_customer_date,
+	order_estimated_delivery_date)
+SELECT
+	ro.order_id,
+	ro.customer_id,
+	sos.status_id,
+	ro.order_purchase_timestamp,
+	ro.order_approved_at,
+	ro.order_delivered_carrier_date,
+	ro.order_delivered_customer_date,
+	ro.order_estimated_delivery_date
+FROM raw.orders ro
+JOIN silver.order_statuses sos ON sos.status_name = ro.order_status
+WHERE NOT EXISTS (
+	SELECT 1
+	FROM silver.orders so
+	WHERE ro.order_id = so.order_id
+);
+
+-- Наполянем таблицу типов платежей
+INSERT INTO silver.payment_types (payment_type)
+SELECT DISTINCT payment_type FROM raw.order_payments op
+WHERE NOT EXISTS (
+	SELECT 1
+	FROM silver.payment_types pt
+	WHERE pt.payment_type = op.payment_type
+);
+
+-- Наполняем таблицу платежей по заказам
+INSERT INTO silver.order_payments (
+	order_id,
+	payment_sequential,
+	payment_id,
+	payment_installments,
+	payment_value
+)
+SELECT
+	op.order_id,
+	op.payment_sequential,
+	pt.payment_id,
+	op.payment_installments,
+	op.payment_value
+FROM raw.order_payments op
+JOIN silver.payment_types pt ON pt.payment_type = op.payment_type
+WHERE NOT EXISTS (
+	SELECT 1
+	FROM silver.order_payments sop
+	WHERE op.order_id = sop.order_id
+	AND op.payment_sequential = sop.payment_sequential
+);
+
+END;
