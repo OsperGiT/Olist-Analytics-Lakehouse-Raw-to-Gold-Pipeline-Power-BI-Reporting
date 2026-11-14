@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS gold.dim_products(
 product_id VARCHAR(32) PRIMARY KEY,
 product_category_original_name VARCHAR(128) NOT NULL, -- Денормализуем таблицу product_category_name
 product_category_english_name VARCHAR(128) NOT NULL, -- Денормализуем таблицу product_category_name
+product_name_length SMALLINT,
 product_description_length INT,
 product_photos_qty SMALLINT,
 product_weight_g DECIMAL(10,2), -- до 99 тон вес допустимый, с головой хватит
